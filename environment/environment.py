@@ -7,6 +7,7 @@ from __future__ import annotations
 import random
 import uuid
 from typing import Optional, Dict, Any
+import re
 
 from environment.models import (
     CargoManifest, CaseMetadata, CustomsCase,
@@ -14,7 +15,7 @@ from environment.models import (
     Channel, CustomsAction, CustomsState,
     AnomalyType, ANOMALY_SEVERITY,
 )
-from environment.cases import CASES, CASES_BY_ID
+from environment.cases import CASES, CASES_BY_ID, CASES_BY_DIFFICULTY
 from environment.graders import (
     AnomalyDetectionGrader,
     ChannelAssignmentGrader,
@@ -91,6 +92,18 @@ class CustomsEnvironment(Environment):
         self._episode_state: Dict[str, Any] = {}
         self._is_active = False
 
+    def get_last_explain(self) -> Dict[str, Any]:
+        """Return latest step explanation payload for judge-facing transparency."""
+        if not self._episode_state:
+            return {"status": "no_episode"}
+        return {
+            "episode_id": self._episode_state.get("episode_id"),
+            "task_name": self._episode_state.get("task_name"),
+            "step": self._episode_state.get("current_step", 0),
+            "last_step_explain": self._episode_state.get("last_step_explain", {}),
+            "trace_id": self._episode_state.get("trace_id"),
+        }
+
     def is_episode_active(self) -> bool:
         """Returns True if an episode is currently in progress."""
         return self._is_active and not self._episode_state.get("done", True)
@@ -99,6 +112,7 @@ class CustomsEnvironment(Environment):
         self,
         task_name: str = TASK_ANOMALY,
         case_id: Optional[str] = None,
+        difficulty: Optional[str] = None,
     ) -> ResetResponse:
         """Start a new episode for the given task."""
         if task_name not in VALID_TASKS:
@@ -109,6 +123,8 @@ class CustomsEnvironment(Environment):
         # Select case
         if case_id and case_id in CASES_BY_ID:
             case: CustomsCase = CASES_BY_ID[case_id]
+        elif difficulty and difficulty in CASES_BY_DIFFICULTY and CASES_BY_DIFFICULTY[difficulty]:
+            case = self._rng.choice(CASES_BY_DIFFICULTY[difficulty])
         else:
             case = self._rng.choice(CASES)
 
@@ -117,6 +133,7 @@ class CustomsEnvironment(Environment):
 
         self._episode_state = {
             "episode_id": episode_id,
+            "trace_id": f"TR-{uuid.uuid4().hex[:12].upper()}",
             "task_name": task_name,
             "max_steps": max_steps,
             "current_step": 0,
@@ -128,6 +145,8 @@ class CustomsEnvironment(Environment):
             "agent_channel": None,
             "step_rewards": [],
             "cumulative_reward": 0.0,
+            "decision_log": [],
+            "last_step_explain": {},
         }
         self._is_active = True
 
@@ -160,6 +179,8 @@ class CustomsEnvironment(Environment):
         shaping_bonus = 0.0
         shaping_penalty = 0.0
         borderline_penalty = 0.0
+        validity_penalty = 0.0
+        validity_issues: list[str] = []
 
         declared_task = action.get("task", "")
         expected_task = EXPECTED_ACTIONS.get(task, [""])[step_num - 1]
@@ -183,6 +204,16 @@ class CustomsEnvironment(Environment):
             predicted = action.get("anomalies", [])
             if not isinstance(predicted, list):
                 predicted = []
+                validity_penalty += 0.05
+                validity_issues.append("anomalies_not_list")
+
+            valid_anomalies = {a.value for a in AnomalyType}
+            invalid_count = sum(1 for a in predicted if a not in valid_anomalies)
+            if invalid_count:
+                per_item = 0.02
+                validity_penalty += min(0.10, invalid_count * per_item)
+                validity_issues.append(f"invalid_anomaly_labels={invalid_count}")
+
             reward, feedback, grader_details = self._grader_anomaly.grade(
                 predicted, metadata
             )
@@ -213,6 +244,9 @@ class CustomsEnvironment(Environment):
         elif step_num == 2:
             # Tasks 2 & 3: assign_channel
             channel_str = action.get("channel", "")
+            if channel_str not in {"GREEN", "ORANGE", "RED"}:
+                validity_penalty += 0.08
+                validity_issues.append("invalid_channel")
             reward, feedback, grader_details = self._grader_channel.grade(
                 channel_str,
                 metadata,
@@ -242,7 +276,7 @@ class CustomsEnvironment(Environment):
 
         elif step_num == 3:
             # Task 3: draft_scn
-            notice_text = action.get("notice_text", "")
+            notice_text = action.get("notice_text", "") or action.get("scn_text", "")
             reward, feedback, grader_details = self._grader_scn.grade(
                 notice_text,
                 manifest,
@@ -250,6 +284,23 @@ class CustomsEnvironment(Environment):
                 agent_anomalies=state["agent_anomalies"],
             )
             details = {**base_details, **grader_details}
+
+            text = notice_text.lower()
+            generic_markers = ["under applicable provisions", "as per law", "the aforesaid importer"]
+            has_generic = sum(1 for m in generic_markers if m in text) >= 2
+            has_specifics = any(str(int(v)) in notice_text for v in [manifest.declared_value_usd, manifest.declared_weight_kg, manifest.iec_age_months])
+            if has_generic and not has_specifics:
+                shaping_penalty += 0.12
+                details["template_penalty"] = 0.12
+
+            contradictions: list[str] = []
+            if "severe_undervaluation" in state["agent_anomalies"] and ("section 14" not in text and "valuation" not in text):
+                contradictions.append("undervaluation_without_section14_or_valuation_basis")
+            if state.get("agent_channel") == "RED" and not any(k in text for k in ["physical inspection", "detention", "seizure"]):
+                contradictions.append("red_channel_without_enforcement_linkage")
+            if contradictions:
+                shaping_penalty += 0.08
+                details["scn_contradictions"] = contradictions
 
             details["scn_pre_plan"] = {
                 "likely_sections": ["14", "111", "112", "114A"],
@@ -274,18 +325,44 @@ class CustomsEnvironment(Environment):
             feedback = "Unexpected step number."
             reward = 0.0
 
-        reward = max(0.0, min(1.0, reward + shaping_bonus - shaping_penalty))
+        base_reward = reward
+        reward = max(0.0, min(1.0, reward + shaping_bonus - shaping_penalty - validity_penalty))
         state["step_rewards"].append(round(reward, 4))
         details["expected_task"] = expected_task
         details["declared_task"] = declared_task
         details["shaping_bonus"] = round(shaping_bonus, 4)
         details["shaping_penalty"] = round(shaping_penalty, 4)
+        details["validity_penalty"] = round(validity_penalty, 4)
+        details["validity_issues"] = validity_issues
+        details["rubric"] = {
+            "base_reward": round(base_reward, 4),
+            "task_alignment": round(max(0.0, 1.0 - (0.10 if declared_task != expected_task else 0.0)), 4),
+            "action_validity": round(max(0.0, 1.0 - validity_penalty), 4),
+            "trajectory_consistency": round(max(0.0, 1.0 - shaping_penalty), 4),
+            "final_reward": round(reward, 4),
+        }
         details["score_anatomy"] = {
-            "base_reward": round(reward - shaping_bonus + shaping_penalty, 4),
+            "base_reward": round(base_reward, 4),
             "trajectory_bonus": round(shaping_bonus, 4),
             "consistency_or_alignment_penalty": round(shaping_penalty - borderline_penalty, 4),
             "borderline_penalty": round(borderline_penalty, 4),
+            "validity_penalty": round(validity_penalty, 4),
             "final_reward": round(reward, 4),
+        }
+
+        decision_entry = {
+            "step": step_num,
+            "task": task,
+            "expected_task": expected_task,
+            "reward": round(reward, 4),
+            "action": action,
+            "rubric": details.get("rubric", {}),
+        }
+        state["decision_log"].append(decision_entry)
+        state["last_step_explain"] = {
+            "feedback": feedback,
+            "details": details,
+            "decision_entry": decision_entry,
         }
 
         state["cumulative_reward"] += reward
@@ -318,12 +395,14 @@ class CustomsEnvironment(Environment):
         s = self._episode_state
         return EnvironmentState(
             episode_id=s.get("episode_id"),
+            trace_id=s.get("trace_id"),
             task_name=s.get("task_name"),
             step=s.get("current_step", 0),
             max_steps=s.get("max_steps", 0),
             done=s.get("done", True),
             cumulative_reward=round(s.get("cumulative_reward", 0.0), 4),
             manifest=s.get("manifest"),
+            decision_log=s.get("decision_log", []),
         )
 
     @property

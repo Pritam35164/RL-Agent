@@ -129,6 +129,7 @@ class ResetRequest(BaseModel):
     # Issue #1 fix: task_name is Optional with default so HEALTHCHECK works
     task_name: str = "manifest-anomaly-detection"
     case_id: Optional[str] = None
+    difficulty: Optional[str] = None  # clean | easy | medium | hard
 
 
 class StepRequest(BaseModel):
@@ -136,6 +137,7 @@ class StepRequest(BaseModel):
     anomalies: Optional[List[str]] = None
     channel: Optional[str] = None
     notice_text: Optional[str] = None       # SCN text from agent
+    scn_text: Optional[str] = None          # compatibility alias
 
 
 class CustomsAction(Action):
@@ -145,6 +147,7 @@ class CustomsAction(Action):
     anomalies: Optional[List[str]] = None
     channel: Optional[str] = None
     notice_text: Optional[str] = None
+    scn_text: Optional[str] = None
 
 
 class CustomsObservation(Observation):
@@ -190,10 +193,12 @@ class StepResponse(BaseModel):
 
 class EnvironmentState(BaseModel):
     episode_id: Optional[str]
+    trace_id: Optional[str] = None
     task_name: Optional[str]
     step: int
     max_steps: int
     done: bool
     cumulative_reward: float
     manifest: Optional[CargoManifest]
+    decision_log: List[Dict[str, Any]] = Field(default_factory=list)
 

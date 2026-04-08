@@ -14,6 +14,7 @@ server:
     state: {method: GET, path: /state}
     health: {method: GET, path: /health}  # Fix #11: space after colon
     tasks: {method: GET, path: /tasks}
+    explain_last: {method: GET, path: /explain-last}
     websocket: {method: WS, path: /ws}
 
 observation_space:
@@ -45,6 +46,7 @@ action_space:
     - {task: detect_anomalies, anomalies: "array of anomaly type strings"}
     - {task: assign_channel, channel: "GREEN | ORANGE | RED"}
     - {task: draft_scn, notice_text: "string (150+ words)"}
+    - {task: draft_scn, scn_text: "string alias accepted and mapped to notice_text"}
 
 reward_range: [0.0, 1.0]
 

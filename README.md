@@ -97,6 +97,7 @@ docker build -t cbic-rl:latest -f Dockerfile .
 | `anomalies` | `list[str] \| None` | `None` | Predicted anomalies (step 1) |
 | `channel` | `str \| None` | `None` | Channel decision `GREEN/ORANGE/RED` (step 2) |
 | `notice_text` | `str \| None` | `None` | Show Cause Notice text (step 3) |
+| `scn_text` | `str \| None` | `None` | Compatibility alias mapped to `notice_text` |
 
 ### Observation
 
@@ -130,12 +131,14 @@ docker build -t cbic-rl:latest -f Dockerfile .
 | Field | Type | Description |
 |---|---|---|
 | `episode_id` | `str \| None` | Active episode id |
+| `trace_id` | `str \| None` | Per-episode trace id for auditability |
 | `task_name` | `str \| None` | Current task |
 | `step` | `int` | Current step number |
 | `max_steps` | `int` | Episode horizon |
 | `done` | `bool` | Whether episode finished |
 | `cumulative_reward` | `float` | Reward sum so far |
 | `manifest` | `CargoManifest \| None` | Current case manifest |
+| `decision_log` | `list[dict]` | Step-by-step audit trail (action, reward, rubric) |
 
 ## Task Modes
 
@@ -149,11 +152,12 @@ docker build -t cbic-rl:latest -f Dockerfile .
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/reset` | Start new episode (`task_name`, optional `case_id`) |
+| `POST` | `/reset` | Start new episode (`task_name`, optional `case_id`, optional `difficulty`) |
 | `POST` | `/step` | Submit current action |
 | `GET` | `/state` | Inspect current episode state |
 | `GET` | `/health` | Liveness check |
 | `GET` | `/tasks` | Returns task metadata |
+| `GET` | `/explain-last` | Returns latest decision rationale payload |
 | `WS` | `/ws` | OpenEnv-style WebSocket message flow (`reset`, `step`, `state`) |
 
 ## Reward Summary
@@ -178,6 +182,10 @@ python server.py
 # Optional: run scorer-format inference loop
 export HF_TOKEN=hf_xxx
 export SERVER_URL=http://localhost:7860
+python inference.py
+
+# Optional: deterministic benchmark cases per task
+export BENCHMARK_MODE=true
 python inference.py
 ```
 

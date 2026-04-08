@@ -1,6 +1,6 @@
 """
 CBIC RL Environment — FastAPI HTTP Server
-Endpoints: POST /reset, POST /step, GET /state, GET /health, GET /tasks
+Endpoints: POST /reset, POST /step, GET /state, GET /health, GET /tasks, GET /explain-last
 Port: 7860
 
 Fixes applied:
@@ -23,7 +23,7 @@ from environment import (
     StepResponse,
     EnvironmentState,
 )
-from environment.environment import VALID_TASKS, TASK_STEPS
+from environment.environment import VALID_TASKS, TASK_STEPS, EXPECTED_ACTIONS
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -86,7 +86,7 @@ async def reset(
         }
 
     try:
-        response = env.reset(task_name=req.task_name, case_id=req.case_id)
+        response = env.reset(task_name=req.task_name, case_id=req.case_id, difficulty=req.difficulty)
         return response
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -99,11 +99,12 @@ async def reset(
 @app.post("/step", response_model=StepResponse)
 async def step(req: StepRequest):
     """Process one agent action in the current episode."""
+    notice_text = req.notice_text or req.scn_text or ""
     action = {
         "task": req.task,
         "anomalies": req.anomalies or [],
         "channel": req.channel or "",
-        "notice_text": req.notice_text or "",
+        "notice_text": notice_text,
     }
     try:
         response = env.step(action)
@@ -140,11 +141,21 @@ async def health():
 async def tasks():
     """List all available tasks with metadata."""
     return {
+        "rubric_keys": [
+            "base_reward",
+            "task_alignment",
+            "action_validity",
+            "trajectory_consistency",
+            "final_reward",
+        ],
         "tasks": [
             {
                 "name": "manifest-anomaly-detection",
                 "difficulty": "easy",
                 "steps": 1,
+                "expected_actions": EXPECTED_ACTIONS["manifest-anomaly-detection"],
+                "reward_components": ["anomaly_detection", "task_alignment", "action_validity"],
+                "failure_modes": ["invalid_anomaly_label", "task_mismatch", "false_positive_burst"],
                 "description": (
                     "Detect all anomaly types present in the manifest. "
                     "Severity-weighted recall scoring."
@@ -154,6 +165,9 @@ async def tasks():
                 "name": "channel-assignment",
                 "difficulty": "medium",
                 "steps": 2,
+                "expected_actions": EXPECTED_ACTIONS["channel-assignment"],
+                "reward_components": ["anomaly_detection", "channel_correctness", "consistency"],
+                "failure_modes": ["lenient_channel_for_high_risk", "invalid_channel", "cross_step_inconsistency"],
                 "description": (
                     "Detect anomalies then assign correct CBIC examination channel. "
                     "Cross-consistency check applies."
@@ -163,6 +177,9 @@ async def tasks():
                 "name": "show-cause-notice",
                 "difficulty": "hard",
                 "steps": 3,
+                "expected_actions": EXPECTED_ACTIONS["show-cause-notice"],
+                "reward_components": ["manifest_facts", "legal_sections", "anomaly_coverage", "enforcement", "structure"],
+                "failure_modes": ["template_scn", "missing_legal_basis", "red_channel_without_linked_enforcement"],
                 "description": (
                     "Full pipeline ending in SCN draft citing actual manifest "
                     "figures and legal Customs Act sections."
@@ -170,6 +187,12 @@ async def tasks():
             },
         ]
     }
+
+
+@app.get("/explain-last")
+async def explain_last():
+    """Return the latest decision rationale for judge explainability checks."""
+    return env.get_last_explain()
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +223,8 @@ async def ws(websocket: WebSocket):
             if msg_type == "reset":
                 task_name = data.get("task_name", "manifest-anomaly-detection")
                 case_id = data.get("case_id")
-                reset_result = ws_env.reset(task_name=task_name, case_id=case_id)
+                difficulty = data.get("difficulty")
+                reset_result = ws_env.reset(task_name=task_name, case_id=case_id, difficulty=difficulty)
                 payload = reset_result.model_dump()
                 response = {
                     "type": "reset_result",
@@ -222,7 +246,10 @@ async def ws(websocket: WebSocket):
                 await websocket.send_json(response)
 
             elif msg_type == "step":
-                step_result = ws_env.step(data)
+                step_data = dict(data)
+                if "notice_text" not in step_data and "scn_text" in step_data:
+                    step_data["notice_text"] = step_data.get("scn_text", "")
+                step_result = ws_env.step(step_data)
                 state = ws_env.get_state()
                 payload = step_result.model_dump()
                 response = {

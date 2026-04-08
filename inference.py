@@ -25,11 +25,18 @@ API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 HF_TOKEN = os.getenv("HF_TOKEN")
 SERVER_URL = os.getenv("SERVER_URL", "http://localhost:7860")  # Fix #8
+BENCHMARK_MODE = os.getenv("BENCHMARK_MODE", "false").lower() == "true"
+client: OpenAI | None = None
 
-if not HF_TOKEN:
-    raise ValueError("HF_TOKEN environment variable is required")
 
-client = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
+def get_client() -> OpenAI:
+    global client
+    if client is not None:
+        return client
+    if not HF_TOKEN:
+        raise ValueError("HF_TOKEN environment variable is required")
+    client = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
+    return client
 
 # ---------------------------------------------------------------------------
 # System prompts
@@ -88,12 +95,41 @@ TASK_CONFIGS = [
     },
 ]
 
+BENCHMARK_CASE_IDS = {
+    "manifest-anomaly-detection": "CASE-004",
+    "channel-assignment": "CASE-017",
+    "show-cause-notice": "CASE-029",
+}
+
+
+def format_start_line(task_name: str) -> str:
+    return f"[START] task={task_name} env=india-customs-inspection model={MODEL_NAME}"
+
+
+def format_step_line(step_num: int, action_name: str, reward: float, done: bool, error: str) -> str:
+    done_str = "true" if done else "false"
+    return (
+        f"[STEP] step={step_num} action={action_name} "
+        f"reward={reward:.2f} done={done_str} error={error}"
+    )
+
+
+def format_end_line(success: bool, rewards: list[float]) -> str:
+    steps_taken = len(rewards)
+    score = (sum(rewards) / steps_taken) if steps_taken else 0.0
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards) if rewards else "0.00"
+    success_str = "true" if success else "false"
+    return f"[END] success={success_str} steps={steps_taken} score={score:.2f} rewards={rewards_str}"
+
 # ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
-def post_reset(http: httpx.Client, task_name: str) -> dict:
-    resp = http.post(f"{SERVER_URL}/reset", json={"task_name": task_name})
+def post_reset(http: httpx.Client, task_name: str, case_id: str | None = None) -> dict:
+    payload = {"task_name": task_name}
+    if case_id:
+        payload["case_id"] = case_id
+    resp = http.post(f"{SERVER_URL}/reset", json=payload)
     resp.raise_for_status()
     return resp.json()
 
@@ -110,7 +146,8 @@ def post_step(http: httpx.Client, payload: dict) -> dict:
 
 def call_llm(system_prompt: str, user_prompt: str) -> str:
     """Call the LLM and return raw content string."""
-    response = client.chat.completions.create(
+    llm_client = get_client()
+    response = llm_client.chat.completions.create(
         model=MODEL_NAME,
         messages=[
             {"role": "system", "content": system_prompt},
@@ -176,7 +213,7 @@ def run_task(task_config: dict) -> None:
     actions = task_config["actions"]
 
     # Print [START] line
-    print(f"[START] task={task_name} env=india-customs-inspection model={MODEL_NAME}")
+    print(format_start_line(task_name))
 
     rewards: list[float] = []
     success = True
@@ -184,7 +221,8 @@ def run_task(task_config: dict) -> None:
     try:
         with httpx.Client(timeout=90.0) as http:
             # Reset environment
-            reset_data = post_reset(http, task_name)
+            benchmark_case_id = BENCHMARK_CASE_IDS.get(task_name) if BENCHMARK_MODE else None
+            reset_data = post_reset(http, task_name, case_id=benchmark_case_id)
             manifest = reset_data.get("manifest", {})
             manifest_text = manifest_to_text(manifest)
 
@@ -263,28 +301,15 @@ def run_task(task_config: dict) -> None:
                     success = False
 
                 rewards.append(reward)
-                print(
-                    f"[STEP] step={step_num} action={action_name} "
-                    f"reward={reward:.2f} done={done_str} error={error_str}"
-                )
+                print(format_step_line(step_num, action_name, reward, done_str == "true", error_str))
 
     except Exception:
         # Emit [END] even on exception
-        rewards_str = ",".join(f"{r:.2f}" for r in rewards) if rewards else "0.00"
-        score = (sum(rewards) / len(rewards)) if rewards else 0.0
-        print(
-            f"[END] success=false steps={len(rewards)} score={score:.2f} rewards={rewards_str}"
-        )
+        print(format_end_line(False, rewards))
         return
 
     # Print [END] line
-    steps_taken = len(rewards)
-    score = (sum(rewards) / steps_taken) if steps_taken else 0.0
-    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-    success_str = "true" if success else "false"
-    print(
-        f"[END] success={success_str} steps={steps_taken} score={score:.2f} rewards={rewards_str}"
-    )
+    print(format_end_line(success, rewards))
 
 
 def main():

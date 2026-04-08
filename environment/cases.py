@@ -1857,3 +1857,11 @@ CASES: list[CustomsCase] = [
 
 # Index by case_id for fast lookup
 CASES_BY_ID: dict[str, CustomsCase] = {c.metadata.case_id: c for c in CASES}
+
+# Index by difficulty for controlled benchmark/evaluation sampling
+CASES_BY_DIFFICULTY: dict[str, list[CustomsCase]] = {
+    "clean": [c for c in CASES if c.metadata.difficulty == "clean"],
+    "easy": [c for c in CASES if c.metadata.difficulty == "easy"],
+    "medium": [c for c in CASES if c.metadata.difficulty == "medium"],
+    "hard": [c for c in CASES if c.metadata.difficulty == "hard"],
+}
