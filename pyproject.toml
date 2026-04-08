@@ -23,6 +23,8 @@ dependencies = [
 dev = [
   "ruff>=0.6.0",
   "pytest>=8.0.0",
+  "openenv>=0.1.13",
+  "uv>=0.5.0",
 ]
 
 [project.scripts]

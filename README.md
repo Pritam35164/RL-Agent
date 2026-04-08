@@ -194,6 +194,8 @@ python inference.py
 - Core runtime uses FastAPI, Uvicorn, Pydantic, OpenAI, PyYAML, and HTTPX.
 - `websockets` is intentionally included for `/ws` protocol support.
 - `openenv-core` is intentionally included for OpenEnv-compatible typing/client integration.
+- `openenv` is intentionally included for local `openenv validate` checks.
+- `uv` is intentionally included to generate and refresh `uv.lock` when needed.
 
 ## Docker Run
 
