@@ -170,6 +170,27 @@ docker build -t cbic-rl:latest -f Dockerfile .
 
 Reward range is `[0.0, 1.0]` per step.
 
+## Baseline Scores
+
+The baseline script was executed with:
+
+- `MODEL_NAME=Qwen/Qwen2.5-72B-Instruct`
+- `API_BASE_URL=https://router.huggingface.co/v1`
+- `SERVER_URL=http://localhost:7860`
+
+Observed baseline from a recent successful run:
+
+| Task | Steps | Rewards | Final Score |
+|---|---:|---|---:|
+| `manifest-anomaly-detection` | 1 | `0.50` | `0.50` |
+| `channel-assignment` | 2 | `0.29,0.01` | `0.15` |
+| `show-cause-notice` | 3 | `0.63,0.03,0.82` | `0.49` |
+
+Notes:
+
+- Scores can vary slightly across runs depending on model output variability.
+- For more reproducible environment-side case selection, enable `BENCHMARK_MODE=true`.
+
 ## Running The Server
 
 ```bash
