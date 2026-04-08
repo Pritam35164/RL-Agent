@@ -40,11 +40,11 @@ observation_space:
     container_type: {type: string}
 
 action_space:
-  type: object
   description: Task-specific action submitted via POST /step
   oneOf:
     - type: object
       required: [task, anomalies]
+      additionalProperties: false
       properties:
         task:
           type: string
@@ -64,6 +64,7 @@ action_space:
               - hs_code_risk
     - type: object
       required: [task, channel]
+      additionalProperties: false
       properties:
         task:
           type: string
@@ -72,17 +73,27 @@ action_space:
           type: string
           enum: [GREEN, ORANGE, RED]
     - type: object
-      required: [task]
-      properties:
-        task:
-          type: string
-          enum: [draft_scn]
-        notice_text:
-          type: string
-          minLength: 150
-        scn_text:
-          type: string
-          minLength: 150
+      oneOf:
+        - type: object
+          required: [task, notice_text]
+          additionalProperties: false
+          properties:
+            task:
+              type: string
+              enum: [draft_scn]
+            notice_text:
+              type: string
+              minLength: 1
+        - type: object
+          required: [task, scn_text]
+          additionalProperties: false
+          properties:
+            task:
+              type: string
+              enum: [draft_scn]
+            scn_text:
+              type: string
+              minLength: 1
 
 reward_range: [0.0, 1.0]
 
