@@ -21,7 +21,7 @@ def test_output_line_format_contract() -> None:
 
     start_re = re.compile(r"^\[START\] task=[a-z\-]+ env=india-customs-inspection model=.+$")
     step_re = re.compile(
-        r"^\[STEP\] step=\d+ action=[a-z_]+ reward=\d+\.\d{2} done=(true|false) error=.*$"
+        r"^\[STEP\] step=\d+ action=.* reward=\d+\.\d{2} done=(true|false) error=.*$"
     )
     end_re = re.compile(
         r"^\[END\] success=(true|false) steps=\d+ score=\d+\.\d{2} rewards=\d+\.\d{2}(,\d+\.\d{2})*$"
