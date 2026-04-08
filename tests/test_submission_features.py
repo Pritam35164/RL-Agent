@@ -49,9 +49,23 @@ def test_reward_bounds_across_all_tasks() -> None:
 
     # Task 3
     env.reset(task_name=TASK_SCN)
-    env.step({"task": "detect_anomalies", "anomalies": []})
-    env.step({"task": "assign_channel", "channel": "ORANGE"})
-    r3_3 = env.step(
+    r3_1 = env.step(
+        {
+            "task": "extract_key_facts",
+            "key_facts": {
+                "declared_value_usd": 1000,
+                "market_value_usd": 1200,
+                "declared_weight_kg": 200,
+                "country_of_origin": "China",
+                "iec_age_months": 6,
+            },
+        }
+    ).reward
+    r3_2 = env.step({"task": "detect_anomalies", "anomalies": []}).reward
+    r3_3 = env.step({"task": "rank_risk_severity", "ranked_anomalies": []}).reward
+    r3_4 = env.step({"task": "assign_channel", "channel": "ORANGE"}).reward
+    r3_5 = env.step({"task": "cite_legal_basis", "legal_sections": ["14", "114A"]}).reward
+    r3_6 = env.step(
         {
             "task": "draft_scn",
             "notice_text": (
@@ -61,7 +75,19 @@ def test_reward_bounds_across_all_tasks() -> None:
             ),
         }
     ).reward
+    r3_7 = env.step(
+        {
+            "task": "propose_enforcement",
+            "enforcement_recommendation": "Recommend duty demand INR 500000 with penalty and confiscation proceedings.",
+        }
+    ).reward
+    assert 0.0 <= r3_1 <= 1.0
+    assert 0.0 <= r3_2 <= 1.0
     assert 0.0 <= r3_3 <= 1.0
+    assert 0.0 <= r3_4 <= 1.0
+    assert 0.0 <= r3_5 <= 1.0
+    assert 0.0 <= r3_6 <= 1.0
+    assert 0.0 <= r3_7 <= 1.0
 
 
 def test_three_task_configs_present() -> None:
@@ -80,13 +106,34 @@ def test_scn_text_notice_text_mapping_in_http_api() -> None:
     reset = client.post("/reset", json={"task_name": "show-cause-notice"})
     assert reset.status_code == 200
 
+    step0 = client.post(
+        "/step",
+        json={
+            "task": "extract_key_facts",
+            "key_facts": {
+                "declared_value_usd": 1200,
+                "market_value_usd": 4800,
+                "declared_weight_kg": 250,
+                "country_of_origin": "China",
+                "iec_age_months": 6,
+            },
+        },
+    )
+    assert step0.status_code == 200
+
     step1 = client.post("/step", json={"task": "detect_anomalies", "anomalies": []})
     assert step1.status_code == 200
 
-    step2 = client.post("/step", json={"task": "assign_channel", "channel": "ORANGE"})
+    step2 = client.post("/step", json={"task": "rank_risk_severity", "ranked_anomalies": []})
     assert step2.status_code == 200
 
-    step3 = client.post(
+    step3 = client.post("/step", json={"task": "assign_channel", "channel": "ORANGE"})
+    assert step3.status_code == 200
+
+    step4 = client.post("/step", json={"task": "cite_legal_basis", "legal_sections": ["14", "114A"]})
+    assert step4.status_code == 200
+
+    step5 = client.post(
         "/step",
         json={
             "task": "draft_scn",
@@ -98,8 +145,8 @@ def test_scn_text_notice_text_mapping_in_http_api() -> None:
         },
     )
 
-    assert step3.status_code == 200
-    body = step3.json()
+    assert step5.status_code == 200
+    body = step5.json()
     assert "details" in body
     assert "legal_sections_score" in body["details"]
 

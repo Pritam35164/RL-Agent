@@ -102,9 +102,13 @@ async def step(req: StepRequest):
     notice_text = req.notice_text or req.scn_text or ""
     action = {
         "task": req.task,
+        "key_facts": req.key_facts or {},
         "anomalies": req.anomalies or [],
+        "ranked_anomalies": req.ranked_anomalies or [],
         "channel": req.channel or "",
+        "legal_sections": req.legal_sections or [],
         "notice_text": notice_text,
+        "enforcement_recommendation": req.enforcement_recommendation or "",
     }
     try:
         response = env.step(action)
@@ -176,13 +180,27 @@ async def tasks():
             {
                 "name": "show-cause-notice",
                 "difficulty": "hard",
-                "steps": 3,
+                "steps": 7,
                 "expected_actions": EXPECTED_ACTIONS["show-cause-notice"],
-                "reward_components": ["manifest_facts", "legal_sections", "anomaly_coverage", "enforcement", "structure"],
-                "failure_modes": ["template_scn", "missing_legal_basis", "red_channel_without_linked_enforcement"],
+                "reward_components": [
+                    "fact_extraction",
+                    "anomaly_detection",
+                    "risk_ranking",
+                    "channel_assignment",
+                    "legal_basis",
+                    "scn_quality",
+                    "enforcement_recommendation",
+                ],
+                "failure_modes": [
+                    "fact_mismatch",
+                    "mis-ranked_risk",
+                    "template_scn",
+                    "missing_legal_basis",
+                    "red_channel_without_linked_enforcement",
+                ],
                 "description": (
-                    "Full pipeline ending in SCN draft citing actual manifest "
-                    "figures and legal Customs Act sections."
+                    "Seven-step full pipeline: extract facts, detect anomalies, rank risk, assign "
+                    "channel, cite legal basis, draft SCN, and propose enforcement."
                 ),
             },
         ]

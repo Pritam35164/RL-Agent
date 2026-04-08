@@ -43,6 +43,16 @@ action_space:
   description: Task-specific action submitted via POST /step
   oneOf:
     - type: object
+      required: [task, key_facts]
+      additionalProperties: false
+      properties:
+        task:
+          type: string
+          enum: [extract_key_facts]
+        key_facts:
+          type: object
+          additionalProperties: true
+    - type: object
       required: [task, anomalies]
       additionalProperties: false
       properties:
@@ -50,6 +60,26 @@ action_space:
           type: string
           enum: [detect_anomalies]
         anomalies:
+          type: array
+          items:
+            type: string
+            enum:
+              - repeat_violator
+              - high_risk_origin
+              - weight_volume_mismatch
+              - severe_undervaluation
+              - new_iec_high_value
+              - suspicious_routing
+              - undisclosed_related_party
+              - hs_code_risk
+    - type: object
+      required: [task, ranked_anomalies]
+      additionalProperties: false
+      properties:
+        task:
+          type: string
+          enum: [rank_risk_severity]
+        ranked_anomalies:
           type: array
           items:
             type: string
@@ -73,6 +103,17 @@ action_space:
           type: string
           enum: [GREEN, ORANGE, RED]
     - type: object
+      required: [task, legal_sections]
+      additionalProperties: false
+      properties:
+        task:
+          type: string
+          enum: [cite_legal_basis]
+        legal_sections:
+          type: array
+          items:
+            type: string
+    - type: object
       oneOf:
         - type: object
           required: [task, notice_text]
@@ -94,6 +135,16 @@ action_space:
             scn_text:
               type: string
               minLength: 1
+    - type: object
+      required: [task, enforcement_recommendation]
+      additionalProperties: false
+      properties:
+        task:
+          type: string
+          enum: [propose_enforcement]
+        enforcement_recommendation:
+          type: string
+          minLength: 1
 
 reward_range: [0.0, 1.0]
 
@@ -110,8 +161,8 @@ tasks:
 
   - name: show-cause-notice
     difficulty: hard
-    steps: 3
-    description: Full pipeline ending in SCN draft citing actual manifest figures and legal sections.
+    steps: 7
+    description: Seven-step pipeline from fact extraction to final enforcement recommendation.
 
 data:
   seed: 42

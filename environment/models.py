@@ -134,20 +134,28 @@ class ResetRequest(BaseModel):
 
 class StepRequest(BaseModel):
     task: str
+    key_facts: Optional[Dict[str, Any]] = None
     anomalies: Optional[List[str]] = None
+    ranked_anomalies: Optional[List[str]] = None
     channel: Optional[str] = None
+    legal_sections: Optional[List[str]] = None
     notice_text: Optional[str] = None       # SCN text from agent
     scn_text: Optional[str] = None          # compatibility alias
+    enforcement_recommendation: Optional[str] = None
 
 
 class CustomsAction(Action):
     """OpenEnv-compatible action model for this environment."""
 
     task: str
+    key_facts: Optional[Dict[str, Any]] = None
     anomalies: Optional[List[str]] = None
+    ranked_anomalies: Optional[List[str]] = None
     channel: Optional[str] = None
+    legal_sections: Optional[List[str]] = None
     notice_text: Optional[str] = None
     scn_text: Optional[str] = None
+    enforcement_recommendation: Optional[str] = None
 
 
 class CustomsObservation(Observation):

@@ -73,6 +73,31 @@ You MUST include in the SCN:
 
 Return ONLY valid JSON: {"scn_text": "<full SCN text here>"}"""
 
+STEP0_SYSTEM = """You are a CBIC intake officer extracting core manifest facts.
+Return ONLY valid JSON with key 'key_facts' containing:
+- declared_value_usd
+- market_value_usd
+- declared_weight_kg
+- country_of_origin
+- iec_age_months
+
+Example:
+{"key_facts": {"declared_value_usd": 1200, "market_value_usd": 4800, "declared_weight_kg": 250, "country_of_origin": "China", "iec_age_months": 6}}"""
+
+STEP_RANK_SYSTEM = """You are a CBIC risk assessor.
+Given the anomaly list, rank anomalies from highest to lowest operational risk.
+Return ONLY valid JSON: {"ranked_anomalies": ["...", "..."]}
+Keep labels exactly from the provided anomaly list."""
+
+STEP_LEGAL_SYSTEM = """You are a customs legal officer.
+Select the most relevant Customs Act sections for this case.
+Return ONLY valid JSON: {"legal_sections": ["14", "111", "114A"]}
+Valid set: 14, 18, 46, 47, 111, 112, 113, 114, 114A, 127"""
+
+STEP_ENFORCE_SYSTEM = """You are drafting the final enforcement recommendation.
+Return ONLY valid JSON: {"enforcement_recommendation": "..."}
+Include duty demand/penalty/confiscation direction and at least one numeric amount."""
+
 # ---------------------------------------------------------------------------
 # Task configuration
 # ---------------------------------------------------------------------------
@@ -90,8 +115,16 @@ TASK_CONFIGS = [
     },
     {
         "task_name": "show-cause-notice",
-        "steps": 3,
-        "actions": ["detect_anomalies", "assign_channel", "draft_scn"],
+        "steps": 7,
+        "actions": [
+            "extract_key_facts",
+            "detect_anomalies",
+            "rank_risk_severity",
+            "assign_channel",
+            "cite_legal_basis",
+            "draft_scn",
+            "propose_enforcement",
+        ],
     },
 ]
 
@@ -248,6 +281,15 @@ def build_step_action_summary(
     details = step_result.get("details") or {}
     feedback = sanitize_for_step_field(str(step_result.get("feedback") or ""), max_len=160)
 
+    if action_name == "extract_key_facts":
+        key_facts = payload.get("key_facts") or {}
+        matched = details.get("matched_fields") or []
+        mismatched = details.get("mismatched_fields") or []
+        return sanitize_for_step_field(
+            f"I first anchor the file on hard facts: {key_facts}. Validation confirms matched={matched} and mismatched={mismatched}. "
+            f"Intake note: {feedback}",
+        )
+
     if action_name == "detect_anomalies":
         anomalies = payload.get("anomalies") or []
         tp = details.get("true_positives") or []
@@ -308,6 +350,23 @@ def build_step_action_summary(
         idx = _variant_index(str(manifest.get("boe_number", "UNKNOWN")), "channel", modulo=len(variants))
         return sanitize_for_step_field(variants[idx])
 
+    if action_name == "rank_risk_severity":
+        ranked = payload.get("ranked_anomalies") or []
+        expected = details.get("expected_order") or []
+        return sanitize_for_step_field(
+            f"I prioritize risk as {ranked if ranked else 'none'} to drive downstream action. "
+            f"Benchmark order is {expected if expected else 'none'}. Ranking note: {feedback}",
+        )
+
+    if action_name == "cite_legal_basis":
+        sections = payload.get("legal_sections") or []
+        valid = details.get("valid_sections") or []
+        required = details.get("required_sections") or []
+        return sanitize_for_step_field(
+            f"Before drafting, I cite legal anchors {sections}. Valid hits are {valid}; anomaly-linked required anchors are {required}. "
+            f"Legal memo note: {feedback}",
+        )
+
     if action_name == "draft_scn":
         scn_text = payload.get("notice_text", "")
         words = len((scn_text or "").split())
@@ -338,6 +397,12 @@ def build_step_action_summary(
         idx = _variant_index(str(boe), "scn", modulo=len(variants))
         return sanitize_for_step_field(variants[idx])
 
+    if action_name == "propose_enforcement":
+        recommendation = payload.get("enforcement_recommendation", "")
+        return sanitize_for_step_field(
+            f"I close with enforcement recommendation: {recommendation}. Final control note: {feedback}",
+        )
+
     return action_name
 
 
@@ -348,6 +413,18 @@ def build_benchmark_payload(
     assigned_channel: str,
 ) -> dict:
     """Deterministic local policy for BENCHMARK_MODE runs."""
+    if action_name == "extract_key_facts":
+        return {
+            "task": "extract_key_facts",
+            "key_facts": {
+                "declared_value_usd": int(manifest.get("declared_value_usd") or 0),
+                "market_value_usd": int(manifest.get("market_value_usd") or 0),
+                "declared_weight_kg": int(manifest.get("declared_weight_kg") or 0),
+                "country_of_origin": str(manifest.get("country_of_origin", "")),
+                "iec_age_months": int(manifest.get("iec_age_months") or 0),
+            },
+        }
+
     if action_name == "detect_anomalies":
         anomalies: list[str] = []
         if (manifest.get("previous_violations") or 0) > 0:
@@ -371,6 +448,20 @@ def build_benchmark_payload(
             anomalies.append("weight_volume_mismatch")
         return {"task": "detect_anomalies", "anomalies": anomalies}
 
+    if action_name == "rank_risk_severity":
+        severity = {
+            "repeat_violator": 1.5,
+            "high_risk_origin": 1.4,
+            "weight_volume_mismatch": 1.3,
+            "severe_undervaluation": 1.3,
+            "new_iec_high_value": 1.2,
+            "suspicious_routing": 1.2,
+            "undisclosed_related_party": 1.1,
+            "hs_code_risk": 1.0,
+        }
+        ranked = sorted(detected_anomalies, key=lambda a: severity.get(a, 0.0), reverse=True)
+        return {"task": "rank_risk_severity", "ranked_anomalies": ranked}
+
     if action_name == "assign_channel":
         high_risk_flags = {"repeat_violator", "high_risk_origin", "severe_undervaluation"}
         if any(a in high_risk_flags for a in detected_anomalies):
@@ -380,6 +471,14 @@ def build_benchmark_payload(
         else:
             channel = "GREEN"
         return {"task": "assign_channel", "channel": channel}
+
+    if action_name == "cite_legal_basis":
+        sections = ["111", "114A"]
+        if "severe_undervaluation" in detected_anomalies:
+            sections.insert(0, "14")
+        if "repeat_violator" in detected_anomalies:
+            sections.append("127")
+        return {"task": "cite_legal_basis", "legal_sections": sections[:4]}
 
     if action_name == "draft_scn":
         boe = manifest.get("boe_number", "UNKNOWN")
@@ -396,6 +495,14 @@ def build_benchmark_payload(
             f"Given channel assignment {assigned_channel or 'ORANGE'}, duty demand, penalty, and confiscation proceedings are proposed."
         )
         return {"task": "draft_scn", "notice_text": scn_text}
+
+    if action_name == "propose_enforcement":
+        demand = int((float(manifest.get("declared_value_usd") or 0.0) * 0.35) * 83)
+        recommendation = (
+            f"Recommend duty demand INR {demand}, initiate penalty proceedings, and pursue confiscation review "
+            f"in line with channel {assigned_channel or 'ORANGE'}."
+        )
+        return {"task": "propose_enforcement", "enforcement_recommendation": recommendation}
 
     return {"task": action_name}
 
@@ -423,8 +530,12 @@ def run_task(task_config: dict) -> None:
             manifest_text = manifest_to_text(manifest)
 
             # State carried between steps
+            extracted_facts: dict = {}
             detected_anomalies: list[str] = []
+            ranked_anomalies: list[str] = []
             assigned_channel: str = ""
+            legal_sections: list[str] = []
+            enforcement_recommendation: str = ""
 
             for step_num, action_name in enumerate(actions, start=1):
                 error_str = "null"
@@ -433,7 +544,28 @@ def run_task(task_config: dict) -> None:
                 action_summary = action_name
 
                 try:
-                    if action_name == "detect_anomalies":
+                    if action_name == "extract_key_facts":
+                        if BENCHMARK_MODE:
+                            payload = build_benchmark_payload(
+                                action_name=action_name,
+                                manifest=manifest,
+                                detected_anomalies=detected_anomalies,
+                                assigned_channel=assigned_channel,
+                            )
+                            extracted_facts = payload.get("key_facts", {})
+                        else:
+                            user_prompt = (
+                                f"Extract key factual fields from this manifest exactly as values:\n\n{manifest_text}"
+                            )
+                            content = call_llm(STEP0_SYSTEM, user_prompt)
+                            parsed = parse_json_safe(content, {"key_facts": {}})
+                            extracted_facts = parsed.get("key_facts", {}) or {}
+                            payload = {
+                                "task": "extract_key_facts",
+                                "key_facts": extracted_facts,
+                            }
+
+                    elif action_name == "detect_anomalies":
                         if BENCHMARK_MODE:
                             payload = build_benchmark_payload(
                                 action_name=action_name,
@@ -454,6 +586,29 @@ def run_task(task_config: dict) -> None:
                             payload = {
                                 "task": "detect_anomalies",
                                 "anomalies": detected_anomalies,
+                            }
+
+                    elif action_name == "rank_risk_severity":
+                        if BENCHMARK_MODE:
+                            payload = build_benchmark_payload(
+                                action_name=action_name,
+                                manifest=manifest,
+                                detected_anomalies=detected_anomalies,
+                                assigned_channel=assigned_channel,
+                            )
+                            ranked_anomalies = payload.get("ranked_anomalies", [])
+                        else:
+                            user_prompt = (
+                                f"Manifest:\n{manifest_text}\n\n"
+                                f"Detected anomalies: {detected_anomalies}\n\n"
+                                f"Rank these anomalies from highest to lowest risk."
+                            )
+                            content = call_llm(STEP_RANK_SYSTEM, user_prompt)
+                            parsed = parse_json_safe(content, {"ranked_anomalies": []})
+                            ranked_anomalies = parsed.get("ranked_anomalies", [])
+                            payload = {
+                                "task": "rank_risk_severity",
+                                "ranked_anomalies": ranked_anomalies,
                             }
 
                     elif action_name == "assign_channel":
@@ -478,6 +633,30 @@ def run_task(task_config: dict) -> None:
                             payload = {
                                 "task": "assign_channel",
                                 "channel": assigned_channel,
+                            }
+
+                    elif action_name == "cite_legal_basis":
+                        if BENCHMARK_MODE:
+                            payload = build_benchmark_payload(
+                                action_name=action_name,
+                                manifest=manifest,
+                                detected_anomalies=detected_anomalies,
+                                assigned_channel=assigned_channel,
+                            )
+                            legal_sections = payload.get("legal_sections", [])
+                        else:
+                            user_prompt = (
+                                f"Manifest:\n{manifest_text}\n\n"
+                                f"Detected anomalies: {detected_anomalies}\n"
+                                f"Channel assigned: {assigned_channel}\n\n"
+                                f"Choose the most relevant customs legal sections."
+                            )
+                            content = call_llm(STEP_LEGAL_SYSTEM, user_prompt)
+                            parsed = parse_json_safe(content, {"legal_sections": []})
+                            legal_sections = parsed.get("legal_sections", [])
+                            payload = {
+                                "task": "cite_legal_basis",
+                                "legal_sections": legal_sections,
                             }
 
                     elif action_name == "draft_scn":
@@ -505,6 +684,35 @@ def run_task(task_config: dict) -> None:
                                 "task": "draft_scn",
                                 "notice_text": scn_text,  # Fix #2: correct field name
                             }
+
+                    elif action_name == "propose_enforcement":
+                        if BENCHMARK_MODE:
+                            payload = build_benchmark_payload(
+                                action_name=action_name,
+                                manifest=manifest,
+                                detected_anomalies=detected_anomalies,
+                                assigned_channel=assigned_channel,
+                            )
+                            enforcement_recommendation = payload.get("enforcement_recommendation", "")
+                        else:
+                            user_prompt = (
+                                f"Manifest:\n{manifest_text}\n\n"
+                                f"Anomalies: {detected_anomalies}\n"
+                                f"Ranked risk: {ranked_anomalies}\n"
+                                f"Channel: {assigned_channel}\n"
+                                f"Legal sections: {legal_sections}\n\n"
+                                f"Provide final enforcement recommendation with amount and action."
+                            )
+                            content = call_llm(STEP_ENFORCE_SYSTEM, user_prompt)
+                            parsed = parse_json_safe(content, {"enforcement_recommendation": ""})
+                            enforcement_recommendation = parsed.get("enforcement_recommendation", "")
+                            payload = {
+                                "task": "propose_enforcement",
+                                "enforcement_recommendation": enforcement_recommendation,
+                            }
+
+                    else:
+                        payload = {"task": action_name}
 
                     # Submit step to environment
                     step_result = post_step(http, payload)

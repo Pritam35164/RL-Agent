@@ -42,13 +42,21 @@ VALID_TASKS = {TASK_ANOMALY, TASK_CHANNEL, TASK_SCN}
 TASK_STEPS = {
     TASK_ANOMALY: 1,
     TASK_CHANNEL: 2,
-    TASK_SCN: 3,
+    TASK_SCN: 7,
 }
 
 EXPECTED_ACTIONS = {
     TASK_ANOMALY: ["detect_anomalies"],
     TASK_CHANNEL: ["detect_anomalies", "assign_channel"],
-    TASK_SCN: ["detect_anomalies", "assign_channel", "draft_scn"],
+    TASK_SCN: [
+        "extract_key_facts",
+        "detect_anomalies",
+        "rank_risk_severity",
+        "assign_channel",
+        "cite_legal_basis",
+        "draft_scn",
+        "propose_enforcement",
+    ],
 }
 
 ANOMALY_LEGAL_BASIS = {
@@ -75,6 +83,111 @@ def _queue_pressure(difficulty: str) -> str:
         "medium": "high",
         "hard": "critical",
     }.get(difficulty, "moderate")
+
+
+def _norm_text(value: Any) -> str:
+    return str(value).strip().lower()
+
+
+def _score_key_facts(submitted: Dict[str, Any], manifest: CargoManifest) -> tuple[float, Dict[str, Any]]:
+    expected = {
+        "declared_value_usd": str(int(manifest.declared_value_usd)),
+        "market_value_usd": str(int(manifest.market_value_usd or 0)),
+        "declared_weight_kg": str(int(manifest.declared_weight_kg)),
+        "country_of_origin": _norm_text(manifest.country_of_origin),
+        "iec_age_months": str(manifest.iec_age_months),
+    }
+    matched: list[str] = []
+    mismatched: list[str] = []
+    for key, expected_val in expected.items():
+        if _norm_text(submitted.get(key, "")).replace(",", "") == expected_val:
+            matched.append(key)
+        else:
+            mismatched.append(key)
+    score = len(matched) / len(expected)
+    details = {
+        "matched_fields": matched,
+        "mismatched_fields": mismatched,
+        "expected_fields": expected,
+    }
+    return score, details
+
+
+def _score_risk_ranking(ranked: list[str], true_anomalies: list[AnomalyType]) -> tuple[float, Dict[str, Any]]:
+    if not true_anomalies:
+        score = 1.0 if not ranked else max(0.0, 1.0 - 0.1 * len(ranked))
+        return score, {
+            "expected_order": [],
+            "provided_order": ranked,
+            "order_matches": 0,
+        }
+
+    expected_order = [a.value for a in sorted(true_anomalies, key=lambda x: ANOMALY_SEVERITY.get(x, 1.0), reverse=True)]
+    if not ranked:
+        return 0.0, {
+            "expected_order": expected_order,
+            "provided_order": [],
+            "order_matches": 0,
+        }
+
+    overlap = [a for a in ranked if a in expected_order]
+    overlap_score = len(set(overlap)) / len(expected_order)
+    order_matches = sum(1 for idx, val in enumerate(overlap) if idx < len(expected_order) and expected_order[idx] == val)
+    order_score = order_matches / len(expected_order)
+    score = 0.6 * overlap_score + 0.4 * order_score
+    return max(0.0, min(1.0, score)), {
+        "expected_order": expected_order,
+        "provided_order": ranked,
+        "order_matches": order_matches,
+    }
+
+
+def _score_legal_sections(sections: list[str], agent_anomalies: list[str]) -> tuple[float, Dict[str, Any]]:
+    normalized = [str(s).upper().replace("SECTION", "").strip() for s in sections if str(s).strip()]
+    valid_set = {"14", "18", "46", "47", "111", "112", "113", "114", "114A", "127"}
+    valid_hits = [s for s in normalized if s in valid_set]
+    base_score = min(1.0, len(set(valid_hits)) / 2)
+
+    required = set()
+    if "severe_undervaluation" in agent_anomalies:
+        required.add("14")
+    if "repeat_violator" in agent_anomalies:
+        required.add("127")
+    if "high_risk_origin" in agent_anomalies:
+        required.add("111")
+
+    coverage = 1.0
+    if required:
+        coverage = len(required & set(valid_hits)) / len(required)
+
+    score = 0.7 * base_score + 0.3 * coverage
+    return max(0.0, min(1.0, score)), {
+        "submitted_sections": normalized,
+        "valid_sections": sorted(set(valid_hits)),
+        "required_sections": sorted(required),
+    }
+
+
+def _score_enforcement_text(text: str, assigned_channel: str) -> tuple[float, Dict[str, Any]]:
+    txt = (text or "").lower()
+    keywords = ["duty", "penalty", "confiscation", "seizure", "adjudication", "demand"]
+    keyword_hits = sum(1 for k in keywords if k in txt)
+    has_amount = bool(re.search(r"(?:inr|rs\.?|usd)\s*[\d,]+", txt))
+
+    base = min(1.0, keyword_hits / 3)
+    if has_amount:
+        base = min(1.0, base + 0.25)
+
+    if assigned_channel == "RED" and not any(k in txt for k in ["seizure", "confiscation", "detention"]):
+        base = max(0.0, base - 0.2)
+    if assigned_channel == "GREEN" and any(k in txt for k in ["seizure", "confiscation"]):
+        base = max(0.0, base - 0.2)
+
+    return max(0.0, min(1.0, base)), {
+        "keyword_hits": keyword_hits,
+        "has_amount": has_amount,
+        "assigned_channel": assigned_channel,
+    }
 
 
 class CustomsEnvironment(Environment):
@@ -140,9 +253,12 @@ class CustomsEnvironment(Environment):
             "done": False,
             "manifest": case.manifest,
             "metadata": case.metadata,
+            "agent_key_facts": {},
             "agent_anomalies": [],       # populated after step 1
+            "agent_ranked_anomalies": [],
             # Fix #6: stored for future cross-step validation; not used in SCNGrader
             "agent_channel": None,
+            "agent_legal_sections": [],
             "step_rewards": [],
             "cumulative_reward": 0.0,
             "decision_log": [],
@@ -197,10 +313,20 @@ class CustomsEnvironment(Environment):
         }
 
         # ---------------------------------------------------------------
-        # Route action to correct grader
+        # Route action to correct grader (action-driven for 7-step pipeline)
         # ---------------------------------------------------------------
-        if step_num == 1:
-            # All tasks: detect_anomalies
+        if expected_task == "extract_key_facts":
+            submitted_facts = action.get("key_facts", {})
+            if not isinstance(submitted_facts, dict):
+                submitted_facts = {}
+                validity_penalty += 0.05
+                validity_issues.append("key_facts_not_object")
+            reward, facts_details = _score_key_facts(submitted_facts, manifest)
+            state["agent_key_facts"] = submitted_facts
+            details = {**base_details, **facts_details}
+            feedback = f"Key facts matched fields: {facts_details['matched_fields']}."
+
+        elif expected_task == "detect_anomalies":
             predicted = action.get("anomalies", [])
             if not isinstance(predicted, list):
                 predicted = []
@@ -214,14 +340,9 @@ class CustomsEnvironment(Environment):
                 validity_penalty += min(0.10, invalid_count * per_item)
                 validity_issues.append(f"invalid_anomaly_labels={invalid_count}")
 
-            reward, feedback, grader_details = self._grader_anomaly.grade(
-                predicted, metadata
-            )
+            reward, feedback, grader_details = self._grader_anomaly.grade(predicted, metadata)
             details = {**base_details, **grader_details}
-            state["agent_anomalies"] = [
-                a for a in predicted
-                if isinstance(a, str)
-            ]
+            state["agent_anomalies"] = [a for a in predicted if isinstance(a, str)]
 
             anomaly_narratives = []
             for a in state["agent_anomalies"]:
@@ -230,19 +351,27 @@ class CustomsEnvironment(Environment):
                     anomaly_narratives.append(
                         f"{a}: legal basis {ANOMALY_LEGAL_BASIS[a]}, severity_weight={weight:.1f}"
                     )
-
-            details["pre_read"] = (
-                f"BOE {manifest.boe_number} at {manifest.port_of_entry}: "
-                f"declared USD {int(manifest.declared_value_usd)} vs market "
-                f"USD {int(manifest.market_value_usd or 0)}; IEC age "
-                f"{manifest.iec_age_months} months."
-            )
             details["anomaly_explanation"] = anomaly_narratives
             if anomaly_narratives:
                 feedback = f"{feedback} Officer rationale: {'; '.join(anomaly_narratives)}."
 
-        elif step_num == 2:
-            # Tasks 2 & 3: assign_channel
+        elif expected_task == "rank_risk_severity":
+            ranked = action.get("ranked_anomalies", [])
+            if not isinstance(ranked, list):
+                ranked = []
+                validity_penalty += 0.05
+                validity_issues.append("ranked_anomalies_not_list")
+            reward, rank_details = _score_risk_ranking(ranked, metadata.true_anomalies)
+            state["agent_ranked_anomalies"] = [a for a in ranked if isinstance(a, str)]
+            details = {**base_details, **rank_details}
+            feedback = (
+                f"Risk ranking overlap={len(set(rank_details['provided_order']) & set(rank_details['expected_order']))} "
+                f"with order matches={rank_details['order_matches']}."
+            )
+            if state["step_rewards"]:
+                shaping_bonus += 0.05 * state["step_rewards"][0]
+
+        elif expected_task == "assign_channel":
             channel_str = action.get("channel", "")
             if channel_str not in {"GREEN", "ORANGE", "RED"}:
                 validity_penalty += 0.08
@@ -253,29 +382,31 @@ class CustomsEnvironment(Environment):
                 agent_anomalies=state["agent_anomalies"],
             )
             details = {**base_details, **grader_details}
-            # Fix #6: store for future use
             state["agent_channel"] = channel_str
 
             if details.get("correct") == "RED" and details.get("assigned") == "ORANGE":
                 borderline_penalty = 0.05
                 shaping_penalty += borderline_penalty
 
-            details["deliberation"] = (
-                f"Anomalies flagged: {state['agent_anomalies']}. "
-                f"Assigned {details.get('assigned')} against expected {details.get('correct')}."
+            if state.get("agent_ranked_anomalies") and channel_str == "GREEN":
+                shaping_penalty += 0.08
+                details["ranking_consistency_penalty"] = 0.08
+
+        elif expected_task == "cite_legal_basis":
+            legal_sections = action.get("legal_sections", [])
+            if not isinstance(legal_sections, list):
+                legal_sections = []
+                validity_penalty += 0.05
+                validity_issues.append("legal_sections_not_list")
+            reward, legal_details = _score_legal_sections(legal_sections, state.get("agent_anomalies", []))
+            state["agent_legal_sections"] = [str(s).upper().replace("SECTION", "").strip() for s in legal_sections]
+            details = {**base_details, **legal_details}
+            feedback = (
+                f"Legal grounding captured valid sections {legal_details['valid_sections']} "
+                f"against required anchors {legal_details['required_sections']}."
             )
-            details["escalation"] = {
-                "escalate_to_superintendent": details.get("assigned") == "RED",
-                "follow_up_within_48h": details.get("assigned") in ("ORANGE", "RED"),
-            }
 
-            # Reward coherent progression: good anomaly detection improves policy signal.
-            if state["step_rewards"]:
-                anomaly_quality = state["step_rewards"][0]
-                shaping_bonus += 0.05 * anomaly_quality
-
-        elif step_num == 3:
-            # Task 3: draft_scn
+        elif expected_task == "draft_scn":
             notice_text = action.get("notice_text", "") or action.get("scn_text", "")
             reward, feedback, grader_details = self._grader_scn.grade(
                 notice_text,
@@ -293,36 +424,39 @@ class CustomsEnvironment(Environment):
                 shaping_penalty += 0.12
                 details["template_penalty"] = 0.12
 
+            selected_sections = state.get("agent_legal_sections", [])
+            if selected_sections and not any(sec in text.upper() for sec in selected_sections):
+                shaping_penalty += 0.08
+                details["legal_basis_consistency_penalty"] = 0.08
+
             contradictions: list[str] = []
             if "severe_undervaluation" in state["agent_anomalies"] and ("section 14" not in text and "valuation" not in text):
                 contradictions.append("undervaluation_without_section14_or_valuation_basis")
-            if state.get("agent_channel") == "RED" and not any(k in text for k in ["physical inspection", "detention", "seizure"]):
+            if state.get("agent_channel") == "RED" and not any(k in text for k in ["physical inspection", "detention", "seizure", "confiscation"]):
                 contradictions.append("red_channel_without_enforcement_linkage")
             if contradictions:
                 shaping_penalty += 0.08
                 details["scn_contradictions"] = contradictions
 
-            details["scn_pre_plan"] = {
-                "likely_sections": ["14", "111", "112", "114A"],
-                "must_cite_figures": {
-                    "declared_value_usd": int(manifest.declared_value_usd),
-                    "market_value_usd": int(manifest.market_value_usd or 0),
-                    "declared_weight_kg": int(manifest.declared_weight_kg),
-                    "iec_age_months": manifest.iec_age_months,
-                },
-            }
+            if len(state["step_rewards"]) >= 4:
+                trajectory_quality = sum(state["step_rewards"][:5]) / 5
+                shaping_bonus += 0.05 * trajectory_quality
 
-            # Trajectory-level shaping: SCN should build on earlier decisions.
-            if len(state["step_rewards"]) >= 2:
-                anomaly_quality = state["step_rewards"][0]
-                channel_quality = state["step_rewards"][1]
-                shaping_bonus += 0.05 * ((anomaly_quality + channel_quality) / 2)
-                if anomaly_quality >= 0.8 and channel_quality >= 0.8:
-                    shaping_bonus += 0.05
+        elif expected_task == "propose_enforcement":
+            recommendation = action.get("enforcement_recommendation", "")
+            reward, enforce_details = _score_enforcement_text(recommendation, state.get("agent_channel") or "")
+            details = {**base_details, **enforce_details}
+            feedback = (
+                f"Enforcement recommendation scored with keyword_hits={enforce_details['keyword_hits']} "
+                f"and has_amount={enforce_details['has_amount']}."
+            )
+            if state.get("agent_channel") == "RED" and reward < 0.6:
+                shaping_penalty += 0.10
+                details["enforcement_alignment_penalty"] = 0.10
 
         else:
             details = dict(base_details)
-            feedback = "Unexpected step number."
+            feedback = "Unexpected step configuration."
             reward = 0.0
 
         base_reward = reward
