@@ -155,9 +155,15 @@ def format_step_line(step_num: int, action_name: str, reward: float, done: bool,
     )
 
 
+def _strict_unit_interval(value: float, eps: float = 1e-3) -> float:
+    """Keep values strictly inside (0, 1) for evaluator compatibility."""
+    return max(eps, min(1.0 - eps, value))
+
+
 def format_end_line(success: bool, rewards: list[float]) -> str:
     steps_taken = len(rewards)
     score = (sum(rewards) / steps_taken) if steps_taken else 0.0
+    score = _strict_unit_interval(score)
     rewards_str = ",".join(f"{r:.2f}" for r in rewards) if rewards else "0.00"
     success_str = "true" if success else "false"
     return f"[END] success={success_str} steps={steps_taken} score={score:.3f} rewards={rewards_str}"
@@ -176,10 +182,10 @@ def reported_reward_value(raw_reward: float, difficulty: str, step_num: int) -> 
         profile = BENCHMARK_REWARD_PROFILES.get(difficulty, [])
         idx = step_num - 1
         if 0 <= idx < len(profile):
-            return min(raw_reward, profile[idx])
+            return _strict_unit_interval(min(raw_reward, profile[idx]))
         if raw_reward > 0.97:
             return 0.97
-    return raw_reward
+    return _strict_unit_interval(raw_reward)
 
 # ---------------------------------------------------------------------------
 # HTTP helpers
@@ -835,12 +841,13 @@ def run_task(task_config: dict) -> float:
     except Exception:
         # Emit [END] even on exception
         print(format_end_line(False, rewards))
-        return 0.0
+        return _strict_unit_interval(0.0)
 
     # Print [END] line
     print(format_end_line(success, rewards))
     steps_taken = len(rewards)
     score = (sum(rewards) / steps_taken) if steps_taken else 0.0
+    score = _strict_unit_interval(score)
     print(f"      -> Avg score '{difficulty}': {score:.4f}")
     print("")
     return score
