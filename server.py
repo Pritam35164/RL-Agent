@@ -12,6 +12,8 @@ import os
 import logging
 from contextlib import asynccontextmanager
 
+from typing import Optional
+
 from fastapi import FastAPI, Query, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -63,7 +65,7 @@ app.add_middleware(
 
 @app.post("/reset", response_model=ResetResponse)
 async def reset(
-    req: ResetRequest,
+    req: Optional[ResetRequest] = None,
     healthcheck: bool = Query(default=False),
 ):
     """
@@ -71,6 +73,10 @@ async def reset(
     Fix #1: task_name defaults to 'manifest-anomaly-detection' if not provided.
     Fix #10: If healthcheck=true and an episode is active, skip reset to protect it.
     """
+    # OpenEnv validators may call POST /reset with no request body.
+    # Fall back to default reset parameters in that case.
+    req = req or ResetRequest()
+
     # Fix #10: HEALTHCHECK guard
     if healthcheck and env.is_episode_active():
         return {

@@ -155,6 +155,17 @@ def test_scn_text_notice_text_mapping_in_http_api() -> None:
     assert "legal_sections_score" in body["details"]
 
 
+def test_reset_without_body_is_accepted() -> None:
+    client = TestClient(app)
+    response = client.post("/reset")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "episode_id" in payload
+    assert payload["task_name"] == "manifest-anomaly-detection"
+    assert payload["step"] == 0
+
+
 def test_scn_grader_detects_section_114a() -> None:
     grader = SCNGrader()
     case = CASES[0]
