@@ -16,6 +16,7 @@ from typing import Optional
 
 from fastapi import FastAPI, Query, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from environment import (
     CustomsEnvironment,
@@ -141,6 +142,32 @@ async def state():
 async def health():
     """Health check endpoint."""
     return {"status": "ok"}
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    """Root convenience redirect for browser access on Hugging Face Spaces."""
+    return RedirectResponse(url="/web", status_code=302)
+
+
+@app.get("/web", include_in_schema=False, response_class=HTMLResponse)
+async def web(logs: str | None = Query(default=None)):
+    """Minimal web landing page expected by HF Spaces health/UI probes."""
+    logs_note = f"<p>logs parameter: {logs}</p>" if logs else ""
+    return HTMLResponse(
+        content=(
+            "<html><head><title>CBIC OpenEnv</title></head><body>"
+            "<h2>CBIC RL Environment</h2>"
+            "<p>Server is running.</p>"
+            f"{logs_note}"
+            "<ul>"
+            "<li><a href='/docs'>API Docs</a></li>"
+            "<li><a href='/health'>Health</a></li>"
+            "<li><a href='/tasks'>Tasks</a></li>"
+            "</ul>"
+            "</body></html>"
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
